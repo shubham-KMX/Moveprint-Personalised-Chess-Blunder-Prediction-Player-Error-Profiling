@@ -1,0 +1,13 @@
+# Core
+numpy>=1.24
+torch>=2.0
+scikit-learn>=1.3
+
+# Chess parsing / analysis
+python-chess>=1.999
+
+# Utilities
+tqdm>=4.65
+
+# Hyperparameter search (paper uses Optuna + TPE)
+optuna>=3.4
