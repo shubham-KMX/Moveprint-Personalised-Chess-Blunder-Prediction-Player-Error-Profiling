@@ -45,12 +45,17 @@ def load_records(args) -> List[MoveRecord]:
             moves_per_game=args.moves,
             seed=args.seed,
         )
+    if args.csv:
+        from .data.csv_ingest import ingest_moves_csv
+
+        print(f"[data] ingesting labelled moves CSV from {args.csv} ...")
+        return ingest_moves_csv(args.csv, max_rows=args.max_rows)
     if args.pgn_dir:
         from .data.pgn_ingest import ingest_pgn_dir
 
         print(f"[data] ingesting PGNs from {args.pgn_dir} ...")
         return ingest_pgn_dir(args.pgn_dir, engine_path=args.engine, max_games=args.max_games)
-    raise SystemExit("Provide --synthetic or --pgn-dir.")
+    raise SystemExit("Provide --synthetic, --csv, or --pgn-dir.")
 
 
 def build_model(num_users: int, use_elo: bool, use_user_id: bool = True,
@@ -72,6 +77,10 @@ def remap_user_ids(records: List[MoveRecord]) -> int:
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Chess blunder prediction (Rokach & Shapira 2026).")
     parser.add_argument("--synthetic", action="store_true", help="use the offline synthetic dataset")
+    parser.add_argument("--csv", type=str, default=None,
+                        help="path to a pre-labelled moves CSV (real data)")
+    parser.add_argument("--max-rows", type=int, default=None,
+                        help="cap rows read from --csv (quick runs)")
     parser.add_argument("--pgn-dir", type=str, default=None, help="directory of PGN files")
     parser.add_argument("--engine", type=str, default=None, help="path to a UCI engine (Stockfish)")
     parser.add_argument("--max-games", type=int, default=None)
@@ -164,20 +173,27 @@ def main(argv: Optional[List[str]] = None) -> None:
         }
         for name, kw in variants.items():
             m = build_model(num_users, board_extractor=shared_extractor, **kw)
-            m = train_model(m, train_records, normalizer, train_cfg, device, verbose=False)
+            m = train_model(m, train_records, normalizer, train_cfg, device,
+                            verbose=False, board_embeddings=train_emb)
             s = evaluate(m, make_test_loader(), device)
             print(f"  {name:14s} AUC={s['auc']:.4f} AUC-PR={s['auc_pr']:.4f}")
 
     # --- Per-type specialised models (Section 5.4.2) -----------------------
     if args.per_type:
         print("\n=== Specialised blunder-type models (Section 5.4.2) ===")
-        for name, btype in (("immediate", BlunderType.IMMEDIATE),
-                            ("non_immediate", BlunderType.NON_IMMEDIATE)):
-            m = build_model(num_users, use_elo=False, board_extractor=shared_extractor)
-            m = train_model(m, train_records, normalizer, train_cfg, device,
-                            target_type=btype, verbose=False)
-            s = evaluate(m, make_test_loader(target_type=btype), device)
-            print(f"  {name:14s} AUC={s['auc']:.4f} AUC-PR={s['auc_pr']:.4f}")
+        has_imm = any(r.blunder_type == BlunderType.IMMEDIATE for r in train_records)
+        has_non = any(r.blunder_type == BlunderType.NON_IMMEDIATE for r in train_records)
+        if not (has_imm and has_non):
+            print("  [skip] dataset lacks fine-grained immediate / non_immediate "
+                  "labels; per-type models need both.")
+        else:
+            for name, btype in (("immediate", BlunderType.IMMEDIATE),
+                                ("non_immediate", BlunderType.NON_IMMEDIATE)):
+                m = build_model(num_users, use_elo=False, board_extractor=shared_extractor)
+                m = train_model(m, train_records, normalizer, train_cfg, device,
+                                target_type=btype, verbose=False, board_embeddings=train_emb)
+                s = evaluate(m, make_test_loader(target_type=btype), device)
+                print(f"  {name:14s} AUC={s['auc']:.4f} AUC-PR={s['auc_pr']:.4f}")
 
     print("\n[done]")
 

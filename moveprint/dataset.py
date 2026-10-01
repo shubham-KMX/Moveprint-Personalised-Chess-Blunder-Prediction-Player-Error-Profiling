@@ -66,19 +66,27 @@ class MoveDataset(Dataset):
         records: Sequence[MoveRecord],
         normalizer: Normalizer,
         target_type: Optional[BlunderType] = None,
+        board_embeddings: Optional[np.ndarray] = None,
     ):
+        """`board_embeddings`, when given, is an (N, D) array aligned to
+        `records` holding precomputed *frozen-CNN* board embeddings. When
+        present, the raw planes are not returned and the model's CNN is skipped
+        at train/eval time (the CNN is frozen, so this is exact and much
+        faster).
+        """
         self.records = list(records)
         self.norm = normalizer
         self.target_type = target_type
+        self.board_embeddings = board_embeddings
+        if board_embeddings is not None and len(board_embeddings) != len(self.records):
+            raise ValueError("board_embeddings length must match records length")
 
     def __len__(self) -> int:
         return len(self.records)
 
     def __getitem__(self, idx: int):
         r = self.records[idx]
-        planes = torch.from_numpy(np.ascontiguousarray(r.board_planes)).float()
-        return {
-            "board_planes": planes,
+        item = {
             "user_id": torch.tensor(r.user_id, dtype=torch.long),
             "user_rating": torch.tensor(self.norm.rating(r.user_rating), dtype=torch.float32),
             "opp_rating": torch.tensor(self.norm.rating(r.opponent_rating), dtype=torch.float32),
@@ -86,11 +94,19 @@ class MoveDataset(Dataset):
             "target": torch.tensor(_target_for(r, self.target_type), dtype=torch.float32),
             "phase": torch.tensor(int(r.phase), dtype=torch.long),
         }
+        if self.board_embeddings is not None:
+            item["board_emb"] = torch.from_numpy(
+                np.ascontiguousarray(self.board_embeddings[idx])
+            ).float()
+        else:
+            item["board_planes"] = torch.from_numpy(
+                np.ascontiguousarray(r.board_planes)
+            ).float()
+        return item
 
 
 def collate(batch):
-    return {
-        "board_planes": torch.stack([b["board_planes"] for b in batch]),
+    out = {
         "user_id": torch.stack([b["user_id"] for b in batch]),
         "user_rating": torch.stack([b["user_rating"] for b in batch]),
         "opp_rating": torch.stack([b["opp_rating"] for b in batch]),
@@ -98,3 +114,8 @@ def collate(batch):
         "target": torch.stack([b["target"] for b in batch]),
         "phase": torch.stack([b["phase"] for b in batch]),
     }
+    if "board_emb" in batch[0]:
+        out["board_emb"] = torch.stack([b["board_emb"] for b in batch])
+    else:
+        out["board_planes"] = torch.stack([b["board_planes"] for b in batch])
+    return out

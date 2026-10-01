@@ -24,16 +24,14 @@ from .losses import weighted_bce
 from .model import BlunderPredictor
 
 
-def _split_train_val(records: Sequence[MoveRecord], val_fraction: float, seed: int):
+def _split_train_val_idx(n: int, val_fraction: float, seed: int):
     rng = np.random.default_rng(seed)
-    idx = np.arange(len(records))
+    idx = np.arange(n)
     rng.shuffle(idx)
-    n_val = int(len(records) * val_fraction)
-    val_idx = set(idx[:n_val].tolist())
-    train, val = [], []
-    for i, r in enumerate(records):
-        (val if i in val_idx else train).append(r)
-    return train, val
+    n_val = int(n * val_fraction)
+    val_idx = idx[:n_val]
+    train_idx = idx[n_val:]
+    return train_idx, val_idx
 
 
 def train_model(
@@ -44,16 +42,30 @@ def train_model(
     device: Optional[torch.device] = None,
     target_type: Optional[BlunderType] = None,
     verbose: bool = True,
+    board_embeddings: Optional[np.ndarray] = None,
 ) -> BlunderPredictor:
+    """Train the model.
+
+    If `board_embeddings` (an (N, D) array aligned to `train_records`) is
+    provided, training uses the cached frozen-CNN embeddings and skips the CNN
+    forward pass. This is exact (the CNN is frozen) and much faster.
+    """
     cfg = cfg or TrainConfig()
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
 
     model = model.to(device)
 
-    tr_records, val_records = _split_train_val(train_records, cfg.val_fraction, cfg.seed)
-    train_ds = MoveDataset(tr_records, normalizer, target_type=target_type)
-    val_ds = MoveDataset(val_records, normalizer, target_type=target_type)
+    train_records = list(train_records)
+    tr_idx, val_idx = _split_train_val_idx(len(train_records), cfg.val_fraction, cfg.seed)
+    tr_records = [train_records[i] for i in tr_idx]
+    val_records = [train_records[i] for i in val_idx]
+
+    tr_emb = board_embeddings[tr_idx] if board_embeddings is not None else None
+    val_emb = board_embeddings[val_idx] if board_embeddings is not None else None
+
+    train_ds = MoveDataset(tr_records, normalizer, target_type=target_type, board_embeddings=tr_emb)
+    val_ds = MoveDataset(val_records, normalizer, target_type=target_type, board_embeddings=val_emb)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate)
@@ -73,13 +85,23 @@ def train_model(
         n_batches = 0
         for batch in train_loader:
             optimizer.zero_grad()
-            logits = model(
-                batch["board_planes"].to(device),
-                batch["user_id"].to(device),
-                batch["user_rating"].to(device),
-                batch["opp_rating"].to(device),
-                batch["ply"].to(device),
-            )
+            if "board_emb" in batch:
+                logits = model(
+                    None,
+                    batch["user_id"].to(device),
+                    batch["user_rating"].to(device),
+                    batch["opp_rating"].to(device),
+                    batch["ply"].to(device),
+                    precomputed_board_emb=batch["board_emb"].to(device),
+                )
+            else:
+                logits = model(
+                    batch["board_planes"].to(device),
+                    batch["user_id"].to(device),
+                    batch["user_rating"].to(device),
+                    batch["opp_rating"].to(device),
+                    batch["ply"].to(device),
+                )
             loss = weighted_bce(logits, batch["target"].to(device), cfg.non_blunder_weight)
             loss.backward()
             optimizer.step()

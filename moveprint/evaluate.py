@@ -25,13 +25,23 @@ def predict(model, loader: DataLoader, device: torch.device):
     targets: List[float] = []
     phases: List[int] = []
     for batch in loader:
-        logits = model(
-            batch["board_planes"].to(device),
-            batch["user_id"].to(device),
-            batch["user_rating"].to(device),
-            batch["opp_rating"].to(device),
-            batch["ply"].to(device),
-        )
+        if "board_emb" in batch:
+            logits = model(
+                None,
+                batch["user_id"].to(device),
+                batch["user_rating"].to(device),
+                batch["opp_rating"].to(device),
+                batch["ply"].to(device),
+                precomputed_board_emb=batch["board_emb"].to(device),
+            )
+        else:
+            logits = model(
+                batch["board_planes"].to(device),
+                batch["user_id"].to(device),
+                batch["user_rating"].to(device),
+                batch["opp_rating"].to(device),
+                batch["ply"].to(device),
+            )
         p = torch.sigmoid(logits).cpu().numpy()
         probs.extend(p.tolist())
         targets.extend(batch["target"].numpy().tolist())
