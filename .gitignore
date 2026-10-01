@@ -20,3 +20,7 @@ env/
 .DS_Store
 .idea/
 .vscode/
+
+# Cached frozen-CNN board embeddings
+/embeddings_cache/
+*.npy

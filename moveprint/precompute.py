@@ -27,6 +27,23 @@ def _board_key(planes: np.ndarray) -> bytes:
     return hashlib.sha1(np.ascontiguousarray(planes).view(np.uint8)).digest()
 
 
+def _dataset_signature(records: Sequence[MoveRecord], extractor: RISEv2Mobile) -> str:
+    """A stable hash over the ordered board tensors + extractor identity.
+
+    Guarantees the cache is invalidated if the data order, the boards, or the
+    extractor's architecture/weights change.
+    """
+    h = hashlib.sha1()
+    h.update(f"{extractor.cfg}".encode())
+    # Hash the extractor parameters (captures random-init or loaded weights).
+    for p in extractor.parameters():
+        h.update(p.detach().cpu().numpy().tobytes()[:4096])  # prefix per tensor
+    h.update(str(len(records)).encode())
+    for r in records[:: max(1, len(records) // 512)]:  # sample for speed
+        h.update(_board_key(r.board_planes))
+    return h.hexdigest()[:16]
+
+
 @torch.no_grad()
 def precompute_board_embeddings(
     records: Sequence[MoveRecord],
@@ -35,12 +52,32 @@ def precompute_board_embeddings(
     batch_size: int = 256,
     dedupe: bool = True,
     show_progress: bool = True,
+    cache_dir: Optional[str] = None,
+    cache_tag: Optional[str] = None,
 ) -> np.ndarray:
     """Return an (N, D) float32 array of board embeddings aligned to `records`.
 
     When `dedupe` is True, identical board tensors are embedded once and reused.
+    When `cache_dir` is given, embeddings are saved to / loaded from disk keyed
+    by a signature over the data and extractor, so the (expensive) frozen-CNN
+    pass only runs once across sessions.
     """
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    cache_path = None
+    if cache_dir is not None:
+        import os
+        os.makedirs(cache_dir, exist_ok=True)
+        sig = _dataset_signature(records, extractor)
+        tag = f"{cache_tag}_" if cache_tag else ""
+        cache_path = os.path.join(cache_dir, f"board_emb_{tag}{sig}.npy")
+        if os.path.exists(cache_path):
+            arr = np.load(cache_path)
+            if arr.shape[0] == len(records):
+                if show_progress:
+                    print(f"[precompute] loaded cached embeddings {arr.shape} "
+                          f"from {cache_path}")
+                return arr.astype(np.float32)
     extractor = extractor.to(device).eval()
 
     n = len(records)
@@ -68,6 +105,11 @@ def precompute_board_embeddings(
     else:
         planes = [r.board_planes for r in records]
         out[:] = _embed_planes(planes, extractor, device, batch_size, show_progress)
+
+    if cache_path is not None:
+        np.save(cache_path, out)
+        if show_progress:
+            print(f"[precompute] saved embeddings to {cache_path}")
 
     return out
 

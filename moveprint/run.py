@@ -98,6 +98,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                         help="run the Elo vs user-id ablation (Table 2)")
     parser.add_argument("--per-type", action="store_true",
                         help="train specialised immediate / non-immediate models")
+    parser.add_argument("--cache-dir", type=str, default="embeddings_cache",
+                        help="dir to cache frozen-CNN board embeddings (set empty to disable)")
     args = parser.parse_args(argv)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -132,18 +134,32 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.batch_size is not None:
         train_cfg.batch_size = args.batch_size
 
-    # Shared frozen board extractor (built once, reused across models).
-    shared_extractor = None
+    # Shared frozen board extractor (built once, reused across all models).
+    from .cnn import build_frozen_board_extractor
+    from .precompute import precompute_board_embeddings
+    shared_extractor = build_frozen_board_extractor(device=device)
+
+    # Precompute frozen-CNN board embeddings once (the CNN never updates), with
+    # on-disk caching so the expensive pass runs only once across sessions.
+    print("\n[precompute] caching frozen board embeddings ...")
+    cache_dir = args.cache_dir or None
+    train_emb = precompute_board_embeddings(train_records, shared_extractor, device,
+                                            batch_size=train_cfg.batch_size,
+                                            cache_dir=cache_dir, cache_tag="train")
+    test_emb = precompute_board_embeddings(test_records, shared_extractor, device,
+                                           batch_size=train_cfg.batch_size,
+                                           cache_dir=cache_dir, cache_tag="test")
 
     def make_test_loader(target_type=None):
-        ds = MoveDataset(test_records, normalizer, target_type=target_type)
+        ds = MoveDataset(test_records, normalizer, target_type=target_type,
+                         board_embeddings=test_emb)
         return DataLoader(ds, batch_size=train_cfg.batch_size, shuffle=False, collate_fn=collate)
 
     # --- Main model (Architecture 14: user id only, no Elo) ----------------
     print("\n=== Training main blunder prediction model (Architecture 14) ===")
     model = build_model(num_users, use_elo=False, board_extractor=shared_extractor)
-    shared_extractor = model.board_extractor
-    model = train_model(model, train_records, normalizer, train_cfg, device)
+    model = train_model(model, train_records, normalizer, train_cfg, device,
+                        board_embeddings=train_emb)
 
     test_loader = make_test_loader()
     scores = evaluate(model, test_loader, device)
