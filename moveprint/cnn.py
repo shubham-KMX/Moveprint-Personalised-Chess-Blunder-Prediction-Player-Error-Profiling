@@ -111,7 +111,13 @@ class RISEv2Mobile(nn.Module):
         in_ch = cfg.stem_channels
         for i in range(cfg.num_blocks):
             out_ch = cfg.start_channels + i * cfg.channel_step  # 128, 192, ..., 896
-            blocks.append(InvertedResidualBlock(in_ch, out_ch, se_ratio=cfg.se_ratio))
+            blocks.append(
+                InvertedResidualBlock(
+                    in_ch, out_ch,
+                    expand_ratio=cfg.expand_ratio,
+                    se_ratio=cfg.se_ratio,
+                )
+            )
             in_ch = out_ch
         self.blocks = nn.ModuleList(blocks)
 
@@ -120,9 +126,12 @@ class RISEv2Mobile(nn.Module):
         # the paper ("output of the layer prior to the penultimate layer").
         self.final_channels = in_ch  # 896
 
-        # Projection of the flattened (final_channels * 8 * 8) feature map to a
-        # compact board embedding consumed by the DeepFM model.
-        self.project = nn.Linear(self.final_channels * 8 * 8, cfg.embedding_dim)
+        # Projection of the final feature map to a compact board embedding. When
+        # pooling, the input is `final_channels`; otherwise the full flattened
+        # `final_channels * 8 * 8` map (paper-scale).
+        self.pool_before_projection = cfg.pool_before_projection
+        proj_in = self.final_channels if cfg.pool_before_projection else self.final_channels * 8 * 8
+        self.project = nn.Linear(proj_in, cfg.embedding_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
@@ -130,7 +139,10 @@ class RISEv2Mobile(nn.Module):
         for block in self.blocks:
             feat = block(feat)
         # feat: (B, final_channels, 8, 8) -- the pre-penultimate representation.
-        flat = feat.flatten(start_dim=1)
+        if self.pool_before_projection:
+            flat = feat.mean(dim=(2, 3))          # global average pool -> (B, C)
+        else:
+            flat = feat.flatten(start_dim=1)
         return self.project(flat)
 
 

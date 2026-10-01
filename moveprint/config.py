@@ -44,10 +44,26 @@ class CNNConfig:
     start_channels: int = 128
     channel_step: int = 64
     se_ratio: int = 16
+    # Inverted-residual expansion ratio inside each block. The paper's RISEv2
+    # blocks are 1x1 -> 3x3 -> 1x1; the expansion factor is an implementation
+    # detail. On CPU a factor of 4 on already-wide channels is prohibitively
+    # slow, so the default is 1 (feasible) and can be raised for GPU runs.
+    expand_ratio: int = 1
+    # If True, global-average-pool the final feature map before projection so
+    # the projection input is `final_channels` rather than `final_channels*8*8`.
+    # Keeps the frozen extractor light; the spatial information is still mixed by
+    # the (unpooled) convolutional blocks, matching the "no pooling inside the
+    # backbone" property.
+    pool_before_projection: bool = True
     # Dimension the extracted board feature map is flattened+projected to before
     # it enters the DeepFM model (component (b) output).
     embedding_dim: int = 512
     weights_path: str = "weights/crazyara_risev2.pt"
+
+
+def paper_scale_cnn() -> "CNNConfig":
+    """The paper-scale (GPU-oriented) extractor: full expansion, no pooling."""
+    return CNNConfig(expand_ratio=4, pool_before_projection=False)
 
 
 @dataclass
