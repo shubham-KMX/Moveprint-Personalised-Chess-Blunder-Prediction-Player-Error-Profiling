@@ -9,9 +9,9 @@ dist/
 venv/
 env/
 
-# Model weights / data
-weights/
-data/
+# Model weights / datasets (repo-root only, not the moveprint/data source package)
+/weights/
+/data/
 *.pt
 *.pth
 *.pgn
